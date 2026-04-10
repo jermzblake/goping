@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"sync"
@@ -36,11 +37,11 @@ func NewHTTPClient() *http.Client {
     }
 }
 
-func ping(ctx context.Context, client *http.Client, url string) Result {
+func ping(ctx context.Context, client *http.Client, method string, url string) Result {
 	start := time.Now()
 
 	// Create a request with the provided context
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return Result{URL: url, Error: err}
 	}
@@ -55,12 +56,12 @@ func ping(ctx context.Context, client *http.Client, url string) Result {
 	return Result{URL: url, Status: resp.StatusCode, Latency: latency}
 }
 
-func worker(ctx context.Context, client *http.Client, jobs <-chan string, results chan<- Result, wg *sync.WaitGroup) {
+func worker(ctx context.Context, client *http.Client, method string, jobs <-chan string, results chan<- Result, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for url := range jobs {
 		// Individual timeout per request
 		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		result := ping(reqCtx, client, url)
+		result := ping(reqCtx, client, method, url)
 		cancel()
 		results <- result
 	}
@@ -83,7 +84,14 @@ func reporter(results <-chan Result) {
 }
 
 func main() {
-	urls := []string{
+workerCount := flag.Int("w", 5, "Number of workers")
+        method := flag.String("m", "GET", "HTTP method (GET, HEAD)")
+	flag.Parse()
+	urls := flag.Args()
+
+	if len(urls) == 0 {
+		fmt.Println("No URLs provided. Using default list.")
+		urls = []string{
 		"https://www.google.com",
 		"https://www.facebook.com",
 		"https://www.twitter.com",
@@ -105,6 +113,7 @@ func main() {
 		"https://www.uber.com",
 		"https://invalid-url.test",
 	}
+}
 
 	client := NewHTTPClient() // Create a single shared HTTP client for all workers
 	if tr, ok := client.Transport.(*http.Transport); ok {
@@ -121,11 +130,10 @@ func main() {
 	// go reporter(results)
 	
 	// 2. Start Workers (Producers) Goroutines
-	numWorkers := 3
 	ctx := context.Background() // Base context for all workers
-	for w := 1; w <= numWorkers; w++ {
+	for w := 1; w <= *workerCount; w++ {
 		wg.Add(1)
-		go worker(ctx, client, jobs, results, &wg)
+		go worker(ctx, client, *method, jobs, results, &wg)
 	}
 
 	// 3. Send Jobs (URLs) to the Jobs Channel
