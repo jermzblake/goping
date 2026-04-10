@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
 	"time"
 )
@@ -130,7 +132,9 @@ workerCount := flag.Int("w", 5, "Number of workers")
 	// go reporter(results)
 	
 	// 2. Start Workers (Producers) Goroutines
-	ctx := context.Background() // Base context for all workers
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt) // Base context for all workers
+	defer stop() // Ensure we clean up the context on exit
+	
 	for w := 1; w <= *workerCount; w++ {
 		wg.Add(1)
 		go worker(ctx, client, *method, jobs, results, &wg)
