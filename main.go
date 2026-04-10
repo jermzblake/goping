@@ -15,7 +15,28 @@ type Result struct {
 	Error error
 }
 
-func ping(ctx context.Context, url string) Result {
+// NewClient configures a tuned HTTP client for high-concurrency reuse.
+// This is your "Infrastructure Configuration".
+func NewHTTPClient() *http.Client {
+    t := http.DefaultTransport.(*http.Transport).Clone()
+
+    // Tune pooling while preserving useful defaults from DefaultTransport.
+    t.MaxIdleConns = 100
+    t.MaxIdleConnsPerHost = 10
+    t.MaxConnsPerHost = 20
+    t.IdleConnTimeout = 90 * time.Second
+
+    // Optional guards for slow endpoints.
+    t.TLSHandshakeTimeout = 5 * time.Second
+    t.ResponseHeaderTimeout = 5 * time.Second
+
+    return &http.Client{
+        Transport: t,
+        // Keep this unset (zero) so request context timeout is the single source of truth.
+    }
+}
+
+func ping(ctx context.Context, client *http.Client, url string) Result {
 	start := time.Now()
 
 	// Create a request with the provided context
@@ -23,8 +44,6 @@ func ping(ctx context.Context, url string) Result {
 	if err != nil {
 		return Result{URL: url, Error: err}
 	}
-
-	client := &http.Client{}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -36,12 +55,12 @@ func ping(ctx context.Context, url string) Result {
 	return Result{URL: url, Status: resp.StatusCode, Latency: latency}
 }
 
-func worker(ctx context.Context, jobs <-chan string, results chan<- Result, wg *sync.WaitGroup) {
+func worker(ctx context.Context, client *http.Client, jobs <-chan string, results chan<- Result, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for url := range jobs {
 		// Individual timeout per request
 		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		result := ping(reqCtx, url)
+		result := ping(reqCtx, client, url)
 		cancel()
 		results <- result
 	}
@@ -87,6 +106,11 @@ func main() {
 		"https://invalid-url.test",
 	}
 
+	client := NewHTTPClient() // Create a single shared HTTP client for all workers
+	if tr, ok := client.Transport.(*http.Transport); ok {
+		defer tr.CloseIdleConnections()
+	}
+
 	jobs := make(chan string, len(urls))
 	results := make(chan Result, len(urls))
 	var wg sync.WaitGroup
@@ -101,7 +125,7 @@ func main() {
 	ctx := context.Background() // Base context for all workers
 	for w := 1; w <= numWorkers; w++ {
 		wg.Add(1)
-		go worker(ctx, jobs, results, &wg)
+		go worker(ctx, client, jobs, results, &wg)
 	}
 
 	// 3. Send Jobs (URLs) to the Jobs Channel
