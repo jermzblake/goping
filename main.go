@@ -19,7 +19,10 @@ func ping(ctx context.Context, url string) Result {
 	start := time.Now()
 
 	// Create a request with the provided context
-	req, _ := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return Result{URL: url, Error: err}
+	}
 
 	client := &http.Client{}
 
@@ -36,8 +39,27 @@ func ping(ctx context.Context, url string) Result {
 func worker(ctx context.Context, jobs <-chan string, results chan<- Result, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for url := range jobs {
-		result := ping(ctx, url)
+		// Individual timeout per request
+		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		result := ping(reqCtx, url)
+		cancel()
 		results <- result
+	}
+}
+
+func reporter(results <-chan Result) {
+	for result := range results {
+		if result.Error != nil {
+			fmt.Printf("❌ %-30s | ERROR: %v\n", result.URL, result.Error)
+			continue
+		}
+		
+		statusEmoji := "✅"
+		if result.Status >= 400 {
+			statusEmoji = "⚠️"
+		}
+		
+		fmt.Printf("%s %-30s | %d | %7v\n", statusEmoji, result.URL, result.Status, result.Latency)
 	}
 }
 
@@ -65,41 +87,35 @@ func main() {
 		"https://invalid-url.test",
 	}
 
-	numWorkers := 3
 	jobs := make(chan string, len(urls))
 	results := make(chan Result, len(urls))
-
 	var wg sync.WaitGroup
 
-	// Create a global timeout for the entire operation
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// 1. Start Workers (Goroutines)
+	// 1. Start the Reporter Goroutine first (Consumer)
+	// We don't add this to the WaitGroup because it stops when the results channel is closed
+	// TODO if you want Reporter to be in a separate goroutine, you should add a done channel to signal when it's finished, and wait for it in the main function before exiting.
+	// go reporter(results)
+	
+	// 2. Start Workers (Producers) Goroutines
+	numWorkers := 3
+	ctx := context.Background() // Base context for all workers
 	for w := 1; w <= numWorkers; w++ {
 		wg.Add(1)
 		go worker(ctx, jobs, results, &wg)
 	}
 
-	// 2. Send Jobs (URLs) to the Jobs Channel
+	// 3. Send Jobs (URLs) to the Jobs Channel
 	for _, url := range urls {
 		jobs <- url
 	}
 	close(jobs) // Signal that no more jobs will be sent
 
-	// 3. Wait and Close Results in a separate goroutine
+	// 4. Wait and Close Results in a separate goroutine
 	go func() {
 		wg.Wait() // Wait for all workers to finish
 		close(results) // Close results channel after all workers are done
 	}()
 
-	// 4. Collect and Print Results
-	for result := range results {
-		if result.Error != nil {
-			fmt.Printf("❌ %-25s | Error: %v\n", result.URL, result.Error)
-		} else {
-			fmt.Printf("✅ %-25s | Status: %d | Latency: %v\n", result.URL, result.Status, result.Latency)
-		}
-	}
-
+	reporter(results) // Start the reporter in the main goroutine to print results as they come in
+	fmt.Println("\n--- Scan Complete ---")
 }
